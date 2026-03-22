@@ -1,22 +1,17 @@
 # test.ps1 — Run the unit test suite
 param(
-    [string]$Filter  = "",
-    [switch]$Verbose
+    [string]$Filter  = "",   # substring filter, e.g. "chunker", "store", "index"
+    [switch]$Verbose         # show println! output for passing tests
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$args_list = @("test")
+$runArgs = @("test")
 
-if ($Filter) {
-    $args_list += $Filter
-}
+if ($Filter)  { $runArgs += $Filter }
+if ($Verbose) { $runArgs += "--", "--nocapture" }
 
-if ($Verbose) {
-    $args_list += "--", "--nocapture"
-}
-
-Write-Host "==> cargo $($args_list -join ' ')"
-& cargo @args_list
+Write-Host "==> cargo $($runArgs -join ' ')"
+& cargo @runArgs
 exit $LASTEXITCODE

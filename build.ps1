@@ -1,21 +1,39 @@
-# build.ps1 — Compile the project, index a repo, write report.json / report.md
+# build.ps1 — Compile the project and incrementally index a repo into index.db
+#
+# Default paths are read from config.txt (key=value, one per line).
+# Any parameter can be overridden on the command line.
 param(
-    [string]$Repo   = "hmosworld-master",
-    [string]$Model  = "C:\Program Files\Huawei\DevEco Studio\plugins\codegenie-plugin\embedding_model\VESO-model\VESO-25M",
-    [string]$Ort    = "C:\Users\qinzh\Downloads\onnxruntime-win-x64-1.24.4\lib\onnxruntime.dll",
-    [string]$Out    = "index.bin",
-    [int]   $Batch  = 16,
-    [string]$Report = "report",
-    [switch]$SkipCompile
+    [string]$Repo        = "hmosworld-master",
+    [string]$Model       = "",        # filled from config.txt if empty
+    [string]$Ort         = "",        # filled from config.txt if empty
+    [string]$Database    = "index.db",
+    [int]   $Batch       = 16,
+    [string]$Report      = "report",
+    [switch]$SkipCompile,
+    [switch]$Force        # wipe the DB and re-embed everything from scratch
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# ── Locate onnxruntime.dll ────────────────────────────────────────────────────
-if (-not (Test-Path $Ort)) {
-    Write-Error "onnxruntime.dll not found at '$Ort'. Use -Ort to specify the path."
+# ── Load config.txt defaults ──────────────────────────────────────────────────
+$configFile = Join-Path $PSScriptRoot "config.txt"
+if (Test-Path $configFile) {
+    Get-Content $configFile | ForEach-Object {
+        if ($_ -match '^\s*([^#=]+?)\s*=\s*(.+?)\s*$') {
+            switch ($Matches[1]) {
+                "VESO_ONNX"   { if (-not $Model) { $Model = $Matches[2] } }
+                "ONNXRUNTIME" { if (-not $Ort)   { $Ort   = $Matches[2] } }
+            }
+        }
+    }
 }
+
+# ── Validate ──────────────────────────────────────────────────────────────────
+if (-not $Model) { Write-Error "Model path not set. Add VESO_ONNX=<path> to config.txt or pass -Model." }
+if (-not $Ort)   { Write-Error "ORT path not set. Add ONNXRUNTIME=<path> to config.txt or pass -Ort." }
+if (-not (Test-Path $Ort))   { Write-Error "onnxruntime.dll not found at '$Ort'." }
+if (-not (Test-Path $Model)) { Write-Error "Model directory not found at '$Model'." }
 
 # ── Compile ───────────────────────────────────────────────────────────────────
 if (-not $SkipCompile) {
@@ -27,14 +45,18 @@ if (-not $SkipCompile) {
 # ── Run ───────────────────────────────────────────────────────────────────────
 $bin = Join-Path $PSScriptRoot "target\release\rust-embedding.exe"
 
-Write-Host "==> Building index for '$Repo' ..."
+Write-Host "==> Building index for '$Repo' -> '$Database' ..."
 
-& $bin build `
-    "--repo=$Repo" `
-    "--model=$Model" `
-    "--ort=$Ort" `
-    "--out=$Out" `
-    "--batch=$Batch" `
+$runArgs = @(
+    "build",
+    "--repo=$Repo",
+    "--model=$Model",
+    "--ort=$Ort",
+    "--db=$Database",
+    "--batch=$Batch",
     "--report=$Report"
+)
+if ($Force) { $runArgs += "--force" }
 
+& $bin @runArgs
 exit $LASTEXITCODE

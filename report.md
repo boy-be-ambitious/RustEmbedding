@@ -1,6 +1,6 @@
 # Build Report
 
-Generated: 2026-03-22T04:36:56.613274100+00:00
+Generated: 2026-03-22T05:06:29Z
 
 ## Summary
 
@@ -11,25 +11,25 @@ Generated: 2026-03-22T04:36:56.613274100+00:00
 | Batch size | 16 |
 | Files processed | 161 |
 | Chunks created | 788 |
-| Throughput | 38.0 chunks/s |
-| Index file size | 2.95 MB |
+| Throughput | 35.5 chunks/s |
+| Index file size | 3.84 MB |
 
 ## Timing
 
 | Phase | ms |
 |---|---|
-| Chunking | 18 |
-| Model load | 284 |
-| Embedding | 20752 |
+| Chunking | 36 |
+| Model load | 289 |
+| Embedding | 22190 |
 | Index build | 0 |
 | Index save | 3 |
-| **Total** | **21061** |
+| **Total** | **22548** |
 
 ## Memory
 
 | Metric | MB |
 |---|---|
 | RSS before | 5.1 |
-| RSS after | 183.1 |
-| Delta | 178.0 |
-| Peak working set | 418.6 |
+| RSS after | 184.0 |
+| Delta | 178.9 |
+| Peak working set | 419.4 |
