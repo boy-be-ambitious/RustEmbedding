@@ -3,11 +3,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use lancedb::prelude::*;
-use arrow_array::{RecordBatch, StringArray, Int64Array, Float32Array, ArrayRef, UInt8Array, FixedSizeListArray};
+use futures_util::TryStreamExt;
+use lancedb::{Connection, Table, query::ExecutableQuery};
+use arrow_array::{RecordBatch, StringArray, Int64Array, Float32Array, ArrayRef, FixedSizeListArray, RecordBatchIterator, RecordBatchReader};
 use arrow_schema::{Schema, Field, DataType};
-use sha2::{Digest, Sha256};
-use futures::StreamExt;
 
 pub struct ChunkRecord {
     pub file_path: String,
@@ -50,9 +49,9 @@ pub struct LanceStore {
 impl LanceStore {
     pub async fn open(db_path: &Path, dim: usize) -> Result<Self> {
         let uri = db_path.to_string_lossy().to_string();
-        let db = connect(&uri).execute().await
+        let db = lancedb::connect(&uri).execute().await
             .context("Failed to connect to LanceDB")?;
-        
+
         Ok(Self {
             db,
             table_name: "chunks".to_string(),
@@ -62,9 +61,9 @@ impl LanceStore {
     }
 
     pub async fn create_table_if_not_exists(&self) -> Result<()> {
-        let tables = self.db.table_names().execute().await?;
-        
-        if !tables.contains(&self.table_name) {
+        let table_names = self.db.table_names().execute().await?;
+
+        if !table_names.contains(&self.table_name) {
             let schema = Arc::new(Schema::new(vec![
                 Field::new("id", DataType::Int64, false),
                 Field::new("file_path", DataType::Utf8, false),
@@ -76,26 +75,34 @@ impl LanceStore {
                     768
                 ), false),
             ]));
-            let empty_batch = RecordBatch::new_empty(schema);
-            self.db
-                .create_table(&self.table_name)
-                .add(Box::new(std::iter::once(Ok(empty_batch))))
+
+            let batches: Vec<RecordBatch> = vec![];
+            let iter = RecordBatchIterator::new(
+                batches.into_iter().map(Ok),
+                schema.clone(),
+            );
+            self.db.create_table(&self.table_name, Box::new(iter))
                 .execute()
-                .await?;
+                .await
+                .context("Failed to create chunks table")?;
         }
 
-        if !tables.contains(&self.file_meta_table) {
+        if !table_names.contains(&self.file_meta_table) {
             let schema = Arc::new(Schema::new(vec![
                 Field::new("path", DataType::Utf8, false),
                 Field::new("content_hash", DataType::Utf8, false),
                 Field::new("mtime_secs", DataType::Int64, false),
             ]));
-            let empty_batch = RecordBatch::new_empty(schema);
-            self.db
-                .create_table(&self.file_meta_table)
-                .add(Box::new(std::iter::once(Ok(empty_batch))))
+
+            let batches: Vec<RecordBatch> = vec![];
+            let iter = RecordBatchIterator::new(
+                batches.into_iter().map(Ok),
+                schema.clone(),
+            );
+            self.db.create_table(&self.file_meta_table, Box::new(iter))
                 .execute()
-                .await?;
+                .await
+                .context("Failed to create file_meta table")?;
         }
 
         Ok(())
@@ -122,10 +129,14 @@ impl LanceStore {
             embeddings.push(chunk.embedding.clone());
         }
 
-        let embedding_arr = FixedSizeListArray::try_new_from_values(
-            Float32Array::from(embeddings.into_iter().flatten().collect::<Vec<f32>>()),
-            768
-        )?;
+        let flat_embeddings: Vec<f32> = embeddings.iter().flatten().cloned().collect();
+        let values = Arc::new(Float32Array::from(flat_embeddings)) as ArrayRef;
+        let embedding_arr = FixedSizeListArray::new(
+            Arc::new(Field::new("item", DataType::Float32, false)),
+            768,
+            values,
+            None,
+        );
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int64, false),
@@ -140,7 +151,7 @@ impl LanceStore {
         ]));
 
         let batch = RecordBatch::try_new(
-            schema,
+            schema.clone(),
             vec![
                 Arc::new(Int64Array::from(ids)) as ArrayRef,
                 Arc::new(StringArray::from(file_paths)) as ArrayRef,
@@ -151,52 +162,51 @@ impl LanceStore {
             ],
         )?;
 
-        self.db
-            .open_table(&self.table_name)
-            .execute()
-            .await?
-            .add(Box::new(std::iter::once(Ok(batch))))
-            .execute()
-            .await?;
+        let table = self.db.open_table(&self.table_name).execute().await
+            .context("Failed to open chunks table")?;
+
+        let iter = RecordBatchIterator::new(
+            vec![batch].into_iter().map(Ok),
+            schema.clone(),
+        );
+        table.add(Box::new(iter)).execute().await?;
 
         Ok(())
     }
 
     pub async fn search(&self, query_vec: &[f32], top_k: usize) -> Result<Vec<SearchResult>> {
         let table = self.db.open_table(&self.table_name).execute().await?;
-        
-        let mut results = table
-            .vector_search(query_vec.to_vec())
-            .column("embedding")
-            .nprobes(20)
-            .refine_factor(10)
-            .build()?
-            .limit(top_k)
+
+        let results = table
+            .query()
+            .nearest_to(query_vec)?
             .execute()
             .await?;
 
+        let batches: Vec<RecordBatch> = results.try_collect().await?;
+
         let mut search_results = Vec::new();
-        
-        while let Some(batch) = results.try_next().await? {
-            let file_paths = batch.column_by_name("file_path")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let start_lines = batch.column_by_name("start_line")
-                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let end_lines = batch.column_by_name("end_line")
-                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-            let texts = batch.column_by_name("text")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let distances = batch.column_by_name("_distance")
-                .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
+
+        for batch in batches {
+            let file_paths = batch.column_by_name("file_path");
+            let start_lines = batch.column_by_name("start_line");
+            let end_lines = batch.column_by_name("end_line");
+            let texts = batch.column_by_name("text");
+            let distances = batch.column_by_name("_distance");
 
             if let (Some(fp), Some(sl), Some(el), Some(txt)) = (file_paths, start_lines, end_lines, texts) {
+                let fp = fp.as_any().downcast_ref::<StringArray>().unwrap();
+                let sl = sl.as_any().downcast_ref::<Int64Array>().unwrap();
+                let el = el.as_any().downcast_ref::<Int64Array>().unwrap();
+                let txt = txt.as_any().downcast_ref::<StringArray>().unwrap();
+                let d = distances.as_ref().and_then(|c| c.as_any().downcast_ref::<Float32Array>());
                 for i in 0..batch.num_rows() {
-                    let score = if let Some(d) = distances {
-                        1.0 - d.value(i)
+                    let score = if let Some(dv) = d {
+                        1.0 - dv.value(i)
                     } else {
                         1.0
                     };
-                    
+
                     search_results.push(SearchResult {
                         score,
                         file_path: fp.value(i).to_string(),
@@ -208,30 +218,25 @@ impl LanceStore {
             }
         }
 
+        search_results.truncate(top_k);
         Ok(search_results)
     }
 
     pub async fn delete_by_file(&self, file_path: &str) -> Result<()> {
         let table = self.db.open_table(&self.table_name).execute().await?;
-        table
-            .delete(&format!("file_path = '{}'", file_path.replace("'", "''")))
-            .execute()
+        table.delete(&format!("file_path = '{}'", file_path.replace("'", "''")))
             .await?;
-        
+
         let meta_table = self.db.open_table(&self.file_meta_table).execute().await?;
-        meta_table
-            .delete(&format!("path = '{}'", file_path.replace("'", "''")))
-            .execute()
+        meta_table.delete(&format!("path = '{}'", file_path.replace("'", "''")))
             .await?;
-        
+
         Ok(())
     }
 
     pub async fn upsert_file_meta(&self, path: &str, hash: &str, mtime: u64) -> Result<()> {
         let meta_table = self.db.open_table(&self.file_meta_table).execute().await?;
-        meta_table
-            .delete(&format!("path = '{}'", path.replace("'", "''")))
-            .execute()
+        meta_table.delete(&format!("path = '{}'", path.replace("'", "''")))
             .await?;
 
         let schema = Arc::new(Schema::new(vec![
@@ -241,7 +246,7 @@ impl LanceStore {
         ]));
 
         let batch = RecordBatch::try_new(
-            schema,
+            schema.clone(),
             vec![
                 Arc::new(StringArray::from(vec![path])) as ArrayRef,
                 Arc::new(StringArray::from(vec![hash])) as ArrayRef,
@@ -249,30 +254,33 @@ impl LanceStore {
             ],
         )?;
 
-        self.db
-            .open_table(&self.file_meta_table)
-            .execute()
-            .await?
-            .add(Box::new(std::iter::once(Ok(batch))))
-            .execute()
-            .await?;
+        let iter = RecordBatchIterator::new(
+            vec![batch].into_iter().map(Ok),
+            schema.clone(),
+        );
+        meta_table.add(Box::new(iter)).execute().await?;
 
         Ok(())
     }
 
     pub async fn get_all_file_meta(&self) -> Result<HashMap<String, String>> {
         let mut result = HashMap::new();
-        let table = self.db.open_table(&self.file_meta_table).execute().await?;
-        let mut scanner = table.scan();
-        let mut stream = scanner.try_into_stream().await?;
+        let table: Table = self.db.open_table(&self.file_meta_table).execute().await?;
 
-        while let Some(batch) = stream.try_next().await? {
-            let paths = batch.column_by_name("path")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-            let hashes = batch.column_by_name("content_hash")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+        let stream = table.query()
+            .execute()
+            .await?;
+
+        use futures_util::StreamExt;
+        let mut stream = stream;
+        while let Some(batch) = stream.next().await {
+            let batch = batch?;
+            let paths = batch.column_by_name("path");
+            let hashes = batch.column_by_name("content_hash");
 
             if let (Some(p), Some(h)) = (paths, hashes) {
+                let p = p.as_any().downcast_ref::<StringArray>().unwrap();
+                let h = h.as_any().downcast_ref::<StringArray>().unwrap();
                 for i in 0..batch.num_rows() {
                     result.insert(p.value(i).to_string(), h.value(i).to_string());
                 }
@@ -283,22 +291,26 @@ impl LanceStore {
     }
 
     pub async fn clear(&self) -> Result<()> {
-        self.db.drop_table(&self.table_name).execute().await?;
-        self.db.drop_table(&self.file_meta_table).execute().await?;
+        if let Err(e) = self.db.drop_table(&self.table_name).await {
+            log::warn!("Failed to drop chunks table: {}", e);
+        }
+        if let Err(e) = self.db.drop_table(&self.file_meta_table).await {
+            log::warn!("Failed to drop file_meta table: {}", e);
+        }
         self.create_table_if_not_exists().await?;
         Ok(())
     }
 
     pub async fn chunk_count(&self) -> Result<usize> {
-        let table = self.db.open_table(&self.table_name).execute().await?;
+        let table: Table = self.db.open_table(&self.table_name).execute().await?;
         let count = table.count_rows(None).await?;
-        Ok(count)
+        Ok(count as usize)
     }
 
     pub async fn file_count(&self) -> Result<usize> {
-        let table = self.db.open_table(&self.file_meta_table).execute().await?;
+        let table: Table = self.db.open_table(&self.file_meta_table).execute().await?;
         let count = table.count_rows(None).await?;
-        Ok(count)
+        Ok(count as usize)
     }
 }
 
@@ -311,7 +323,7 @@ mod tests {
     async fn test_lance_store_insert_and_search() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_lance");
-        
+
         let store = LanceStore::open(&db_path, 768).await.unwrap();
         store.create_table_if_not_exists().await.unwrap();
 
@@ -329,7 +341,7 @@ mod tests {
 
         let query = vec![1.0; 768];
         let results = store.search(&query, 1).await.unwrap();
-        
+
         assert_eq!(results.len(), 1);
     }
 }

@@ -3,7 +3,7 @@ mod embedder;
 mod embedder_concurrent;
 mod index;
 mod perf;
-mod store_lance as store;
+mod store_lance;
 mod tokenizer;
 
 use std::path::PathBuf;
@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 
 use crate::embedder::Embedder;
 use crate::perf::{IndexProfiler, Timer};
-use crate::store::{ChunkRecord, FileStatus, LanceStore};
+use crate::store_lance::{ChunkRecord, FileStatus, LanceStore};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -278,7 +278,7 @@ fn cmd_benchmark(args: BenchmarkArgs) -> Result<()> {
     Ok(())
 }
 
-async fn detect_changes(repo_root: &std::path::Path, store: &LanceStore) -> Result<Vec<crate::store::FileChange>> {
+async fn detect_changes(repo_root: &std::path::Path, store: &LanceStore) -> Result<Vec<crate::store_lance::FileChange>> {
     let mut on_disk: std::collections::HashMap<String, (String, u64)> = std::collections::HashMap::new();
 
     for entry in WalkDir::new(repo_root)
@@ -312,7 +312,7 @@ async fn detect_changes(repo_root: &std::path::Path, store: &LanceStore) -> Resu
             _ => FileStatus::Unchanged,
         };
         if status != FileStatus::Unchanged {
-            changes.push(crate::store::FileChange {
+            changes.push(crate::store_lance::FileChange {
                 path: repo_root.join(rel),
                 status,
                 hash: hash.clone(),
@@ -323,7 +323,7 @@ async fn detect_changes(repo_root: &std::path::Path, store: &LanceStore) -> Resu
 
     for rel in stored.keys() {
         if !on_disk.contains_key(rel) {
-            changes.push(crate::store::FileChange {
+            changes.push(crate::store_lance::FileChange {
                 path: repo_root.join(rel),
                 status: FileStatus::Deleted,
                 hash: String::new(),
