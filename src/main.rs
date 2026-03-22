@@ -1,17 +1,13 @@
-//! CLI entry point for RustEmbedding.
-//!
-//! Sub-commands:
-//!   build  – incrementally chunk/embed a repo into a SQLite database
-//!   search – semantic search against an existing database
-
 mod chunker;
 mod embedder;
-mod index; // kept for unit tests
+mod embedder_concurrent;
+mod index;
 mod perf;
 mod store;
 mod tokenizer;
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -20,8 +16,6 @@ use log::info;
 use crate::embedder::Embedder;
 use crate::perf::{IndexProfiler, Timer};
 use crate::store::{ChunkRecord, FileStatus, Store};
-
-// ─────────────────────────── CLI ─────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
 #[command(
@@ -36,68 +30,54 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Incrementally build / update the vector index.
     Build(BuildArgs),
-    /// Query the index.
     Search(SearchArgs),
+    Benchmark(BenchmarkArgs),
 }
 
 #[derive(Parser, Debug)]
 struct BuildArgs {
-    /// Root directory to scan for .ets files.
     #[arg(long, default_value = "hmosworld-master")]
     repo: PathBuf,
-
-    /// Directory containing tokenizer.json and model_fp16.onnx.
     #[arg(long)]
     model: PathBuf,
-
-    /// Path to onnxruntime.dll (Windows) / libonnxruntime.so.
     #[arg(long)]
     ort: PathBuf,
-
-    /// SQLite database file (created if absent).
     #[arg(long, default_value = "index.db")]
     db: PathBuf,
-
-    /// ONNX inference batch size (16–32 recommended).
     #[arg(long, default_value_t = 16)]
     batch: usize,
-
-    /// Stem for report files; writes <stem>.json and <stem>.md.
-    /// Leave empty to skip.
     #[arg(long, default_value = "")]
     report: String,
-
-    /// Force full re-index even if files are unchanged.
     #[arg(long, default_value_t = false)]
     force: bool,
 }
 
 #[derive(Parser, Debug)]
 struct SearchArgs {
-    /// Natural-language or code query.
     #[arg(long)]
     query: String,
-
-    /// SQLite database produced by `build`.
     #[arg(long, default_value = "index.db")]
     db: PathBuf,
-
-    /// Directory containing tokenizer.json and model_fp16.onnx.
     #[arg(long)]
     model: PathBuf,
-
-    /// Path to onnxruntime.dll.
     #[arg(long)]
     ort: PathBuf,
-
-    /// Number of results to return.
     #[arg(long, default_value_t = 5)]
     top: usize,
 }
 
-// ─────────────────────────── main ────────────────────────────────────────────
+#[derive(Parser, Debug)]
+struct BenchmarkArgs {
+    #[arg(long)]
+    model: PathBuf,
+    #[arg(long)]
+    ort: PathBuf,
+    #[arg(long, default_value_t = 100)]
+    num_texts: usize,
+    #[arg(long, default_value_t = 4)]
+    num_threads: usize,
+}
 
 fn main() -> Result<()> {
     if std::env::var("RUST_LOG").is_err() {
@@ -109,22 +89,18 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Build(a) => cmd_build(a),
         Command::Search(a) => cmd_search(a),
+        Command::Benchmark(a) => cmd_benchmark(a),
     }
 }
 
-// ─────────────────────────── build ───────────────────────────────────────────
-
 fn cmd_build(args: BuildArgs) -> Result<()> {
-    // ── 1. Start profiler (baseline snapshot + background sampler) ────────────
     let profiler = IndexProfiler::start(&args.db);
 
-    // ── 2. Load model ─────────────────────────────────────────────────────────
     info!("Loading tokenizer and ONNX model ...");
     let model_timer = Timer::start();
     let mut embedder = Embedder::load(&args.model, &args.ort)?;
     info!("  Model loaded ({:.2}s).", model_timer.elapsed_secs());
 
-    // ── 3. Open DB and detect changes ─────────────────────────────────────────
     let mut store = Store::open(&args.db, embedder.dim)?;
     info!("Database: {:?}", args.db);
     info!("Scanning {:?} for changes ...", args.repo);
@@ -156,12 +132,10 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
 
     if changes.is_empty() {
         info!("Nothing to do — index is up to date.");
-        // Stop profiler but skip writing report (nothing was embedded).
         let _ = profiler.stop(0.0, 0.0, store.file_count()?, store.chunk_count()?);
         return Ok(());
     }
 
-    // ── 4. Apply deletions ────────────────────────────────────────────────────
     for ch in changes
         .iter()
         .filter(|c| c.status == FileStatus::Deleted || c.status == FileStatus::Modified)
@@ -173,7 +147,6 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
         }
     }
 
-    // ── 5. Chunk files that need (re-)embedding ────────────────────────────────
     let to_embed: Vec<_> = changes
         .iter()
         .filter(|c| c.status == FileStatus::New || c.status == FileStatus::Modified)
@@ -201,7 +174,6 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
         chunk_timer.elapsed_ms() as f64
     );
 
-    // ── 6. Embed in batches ───────────────────────────────────────────────────
     info!(
         "Embedding {} chunks (batch_size={}) ...",
         all_chunks.len(),
@@ -229,7 +201,6 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
     let embedding_secs = embed_timer.elapsed_secs();
     info!("  Embedding done ({:.2}s)", embedding_secs);
 
-    // ── 7. Update file_meta ───────────────────────────────────────────────────
     let db_write_timer = Timer::start();
     for ch in &to_embed {
         let rel = rel_str(&ch.path, &args.repo);
@@ -237,7 +208,6 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
     }
     let db_write_secs = db_write_timer.elapsed_secs();
 
-    // ── 8. Stop profiler and emit report ──────────────────────────────────────
     let file_count = store.file_count()?;
     let chunk_count = store.chunk_count()?;
     let metrics = profiler.stop(embedding_secs, db_write_secs, file_count, chunk_count);
@@ -256,10 +226,8 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
     Ok(())
 }
 
-// ─────────────────────────── search ──────────────────────────────────────────
-
 fn cmd_search(args: SearchArgs) -> Result<()> {
-    let store = Store::open(&args.db, 0)?; // dim=0: store reads it from DB schema
+    let store = Store::open(&args.db, 0)?;
     let mut embedder = Embedder::load(&args.model, &args.ort)?;
 
     let query_vecs = embedder.embed_batch(&[args.query.as_str()])?;
@@ -294,9 +262,51 @@ fn cmd_search(args: SearchArgs) -> Result<()> {
     Ok(())
 }
 
-// ─────────────────────────── helpers ─────────────────────────────────────────
+fn cmd_benchmark(args: BenchmarkArgs) -> Result<()> {
+    println!("=== Concurrency Benchmark ===");
+    println!("Model: {:?}", args.model);
+    println!("ORT: {:?}", args.ort);
+    println!("Num texts: {}", args.num_texts);
+    println!("Num threads: {}", args.num_threads);
+    println!();
 
-/// Return the path relative to `base` as a forward-slash string.
+    let embedder = crate::embedder_concurrent::ConcurrentEmbedder::load(&args.model, &args.ort)?;
+
+    let texts: Vec<String> = (0..args.num_texts)
+        .map(|i| format!("function test_{}() {{ return {}; }}", i, i))
+        .collect();
+    let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+
+    println!("Running sequential embedding...");
+    let start = Instant::now();
+    let _results_seq = embedder.embed_batch(&text_refs)?;
+    let seq_duration = start.elapsed();
+    println!("Sequential: {:?}", seq_duration);
+
+    println!(
+        "\nRunning parallel embedding ({} threads)...",
+        args.num_threads
+    );
+    let start = Instant::now();
+    let _results_par = embedder.embed_batch_parallel(&text_refs, args.num_threads)?;
+    let par_duration = start.elapsed();
+    println!("Parallel: {:?}", par_duration);
+
+    let speedup = seq_duration.as_secs_f64() / par_duration.as_secs_f64();
+    println!("\n=== Results ===");
+    println!("Speedup: {:.2}x", speedup);
+    println!(
+        "Throughput (seq): {:.2} texts/sec",
+        args.num_texts as f64 / seq_duration.as_secs_f64()
+    );
+    println!(
+        "Throughput (par): {:.2} texts/sec",
+        args.num_texts as f64 / par_duration.as_secs_f64()
+    );
+
+    Ok(())
+}
+
 fn rel_str(path: &std::path::Path, base: &std::path::Path) -> String {
     path.strip_prefix(base)
         .unwrap_or(path)
