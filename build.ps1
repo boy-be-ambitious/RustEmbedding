@@ -6,7 +6,7 @@ param(
     [string]$Repo        = "hmosworld-master",
     [string]$Model       = "",        # filled from config.txt if empty
     [string]$Ort         = "",        # filled from config.txt if empty
-    [string]$Database    = "index.db",
+    [string]$Database    = "",        # defaults to <Repo>.db if empty
     [int]   $Batch       = 16,
     [string]$Report      = "report",
     [switch]$SkipCompile,
@@ -44,6 +44,10 @@ if (-not $SkipCompile) {
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 $bin = Join-Path $PSScriptRoot "target\release\rust-embedding.exe"
+
+if (-not $Database) {
+    $Database = "$Repo.db"
+}
 
 Write-Host "==> Building index for '$Repo' -> '$Database' ..."
 
