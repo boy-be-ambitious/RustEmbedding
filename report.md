@@ -1,35 +1,17 @@
 # Build Report
 
-Generated: 2026-03-22T05:06:29Z
-
-## Summary
-
 | Metric | Value |
 |---|---|
-| Repo | `hmosworld-master` |
-| Model | `C:\Program Files\Huawei\DevEco Studio\plugins\codegenie-plugin\embedding_model\VESO-model\VESO-25M` |
-| Batch size | 16 |
-| Files processed | 161 |
-| Chunks created | 788 |
-| Throughput | 35.5 chunks/s |
-| Index file size | 3.84 MB |
-
-## Timing
-
-| Phase | ms |
-|---|---|
-| Chunking | 36 |
-| Model load | 289 |
-| Embedding | 22190 |
-| Index build | 0 |
-| Index save | 3 |
-| **Total** | **22548** |
-
-## Memory
-
-| Metric | MB |
-|---|---|
-| RSS before | 5.1 |
-| RSS after | 184.0 |
-| Delta | 178.9 |
-| Peak working set | 419.4 |
+| total_time | 23.11s |
+| embedding_file_time | 22.12s |
+| db_write_file_time | 0.02s |
+| embedding_symbol_time | 0.00s |
+| db_write_symbol_time | 0.00s |
+| start_memory | 17.59 MB |
+| peak_memory | 416.21 MB |
+| start_cpu | 100.00% |
+| peak_cpu | 1405.16% |
+| start_storage | 3.90 MB |
+| end_storage | 3.90 MB |
+| file_count | 161 |
+| chunk_count | 788 |

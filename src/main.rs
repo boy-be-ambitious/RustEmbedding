@@ -18,7 +18,7 @@ use clap::{Parser, Subcommand};
 use log::info;
 
 use crate::embedder::Embedder;
-use crate::perf::{memory_snapshot, BuildReport, MemoryReport, Timer, TimingMs};
+use crate::perf::{IndexProfiler, Timer};
 use crate::store::{ChunkRecord, FileStatus, Store};
 
 // ─────────────────────────── CLI ─────────────────────────────────────────────
@@ -115,25 +115,21 @@ fn main() -> Result<()> {
 // ─────────────────────────── build ───────────────────────────────────────────
 
 fn cmd_build(args: BuildArgs) -> Result<()> {
-    let total_timer = Timer::start();
-    let mem_before = memory_snapshot();
+    // ── 1. Start profiler (baseline snapshot + background sampler) ────────────
+    let profiler = IndexProfiler::start(&args.db);
 
-    // ── 1. Load model ─────────────────────────────────────────────────────────
+    // ── 2. Load model ─────────────────────────────────────────────────────────
     info!("Loading tokenizer and ONNX model ...");
     let model_timer = Timer::start();
     let mut embedder = Embedder::load(&args.model, &args.ort)?;
-    let model_load_ms = model_timer.elapsed_ms();
-    info!("  Model loaded ({:.2}s).", model_load_ms as f64 / 1000.0);
+    info!("  Model loaded ({:.2}s).", model_timer.elapsed_secs());
 
-    // ── 2. Open DB and detect changes ─────────────────────────────────────────
+    // ── 3. Open DB and detect changes ─────────────────────────────────────────
     let mut store = Store::open(&args.db, embedder.dim)?;
     info!("Database: {:?}", args.db);
-
-    let chunk_timer = Timer::start();
     info!("Scanning {:?} for changes ...", args.repo);
 
     let changes = if args.force {
-        // Treat every file as new by clearing the DB first.
         info!("  --force: clearing existing index.");
         store.clear()?;
         store.detect_changes(&args.repo)?
@@ -155,17 +151,17 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
         .count();
     info!(
         "  Changes: {} new, {} modified, {} deleted",
-        new_count, mod_count, del_count,
+        new_count, mod_count, del_count
     );
 
     if changes.is_empty() {
         info!("Nothing to do — index is up to date.");
-        let total_ms = total_timer.elapsed_ms();
-        info!("TOTAL: {}ms", total_ms);
+        // Stop profiler but skip writing report (nothing was embedded).
+        let _ = profiler.stop(0.0, 0.0, store.file_count()?, store.chunk_count()?);
         return Ok(());
     }
 
-    // ── 3. Apply deletions ────────────────────────────────────────────────────
+    // ── 4. Apply deletions ────────────────────────────────────────────────────
     for ch in changes
         .iter()
         .filter(|c| c.status == FileStatus::Deleted || c.status == FileStatus::Modified)
@@ -177,42 +173,35 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
         }
     }
 
-    // ── 4. Chunk files that need (re-)embedding ────────────────────────────────
+    // ── 5. Chunk files that need (re-)embedding ────────────────────────────────
     let to_embed: Vec<_> = changes
         .iter()
         .filter(|c| c.status == FileStatus::New || c.status == FileStatus::Modified)
         .collect();
 
-    // Collect all chunks across all files to embed in one batched pass.
+    let chunk_timer = Timer::start();
     let mut all_chunks: Vec<ChunkRecord> = Vec::new();
-    // Map chunk index → (file change index) for writing file_meta later.
-    let mut chunk_file_map: Vec<usize> = Vec::new();
-
-    for (fi, ch) in to_embed.iter().enumerate() {
+    for ch in to_embed.iter() {
         let source = std::fs::read_to_string(&ch.path)
             .with_context(|| format!("Cannot read {:?}", ch.path))?;
         let rel = rel_str(&ch.path, &args.repo);
-        let file_chunks = chunker::chunk_source(&source, PathBuf::from(&rel));
-        for fc in file_chunks {
+        for fc in chunker::chunk_source(&source, PathBuf::from(&rel)) {
             all_chunks.push(ChunkRecord {
                 file_path: rel.clone(),
                 start_line: fc.start_line,
                 end_line: fc.end_line,
                 text: fc.text,
             });
-            chunk_file_map.push(fi);
         }
     }
-
-    let chunking_ms = chunk_timer.elapsed_ms();
     info!(
-        "  {} files → {} chunks to embed ({:.2}ms chunking)",
+        "  {} files → {} chunks to embed ({:.0}ms chunking)",
         to_embed.len(),
         all_chunks.len(),
-        chunking_ms as f64
+        chunk_timer.elapsed_ms() as f64
     );
 
-    // ── 5. Embed in batches ───────────────────────────────────────────────────
+    // ── 6. Embed in batches ───────────────────────────────────────────────────
     info!(
         "Embedding {} chunks (batch_size={}) ...",
         all_chunks.len(),
@@ -220,8 +209,8 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
     );
     let embed_timer = Timer::start();
     let total_chunks = all_chunks.len();
-
     let mut done = 0usize;
+
     for batch_start in (0..total_chunks).step_by(args.batch) {
         let batch_end = (batch_start + args.batch).min(total_chunks);
         let texts: Vec<&str> = all_chunks[batch_start..batch_end]
@@ -229,74 +218,35 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
             .map(|c| c.text.as_str())
             .collect();
         let vecs = embedder.embed_batch(&texts)?;
-
         for (i, vec) in vecs.into_iter().enumerate() {
             store.insert_chunk(&all_chunks[batch_start + i], &vec)?;
         }
-
         done += batch_end - batch_start;
         if done % 50 < args.batch || done == total_chunks {
             info!("  {}/{} chunks embedded", done, total_chunks);
         }
     }
+    let embedding_secs = embed_timer.elapsed_secs();
+    info!("  Embedding done ({:.2}s)", embedding_secs);
 
-    let embedding_ms = embed_timer.elapsed_ms();
-    info!("  Embedding done ({:.2}s)", embedding_ms as f64 / 1000.0);
-
-    // ── 6. Update file_meta for new/modified files ────────────────────────────
-    let save_timer = Timer::start();
+    // ── 7. Update file_meta ───────────────────────────────────────────────────
+    let db_write_timer = Timer::start();
     for ch in &to_embed {
         let rel = rel_str(&ch.path, &args.repo);
         store.upsert_file_meta(&rel, &ch.hash, ch.mtime)?;
     }
-    let index_save_ms = save_timer.elapsed_ms();
+    let db_write_secs = db_write_timer.elapsed_secs();
 
-    // ── 7. Stats ──────────────────────────────────────────────────────────────
-    let total_ms = total_timer.elapsed_ms();
-    let mem_after = memory_snapshot();
-    let db_size_mb = std::fs::metadata(&args.db)
-        .map(|m| m.len() as f64 / (1024.0 * 1024.0))
-        .unwrap_or(0.0);
-    let total_files = store.file_count()?;
-    let total_stored_chunks = store.chunk_count()?;
-    let throughput = if embedding_ms > 0 {
-        total_chunks as f64 / (embedding_ms as f64 / 1000.0)
-    } else {
-        0.0
-    };
+    // ── 8. Stop profiler and emit report ──────────────────────────────────────
+    let file_count = store.file_count()?;
+    let chunk_count = store.chunk_count()?;
+    let metrics = profiler.stop(embedding_secs, db_write_secs, file_count, chunk_count);
 
-    let report = BuildReport {
-        generated_at_unix: chrono::Utc::now().timestamp(),
-        generated_at: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-        repo_path: args.repo.to_string_lossy().to_string(),
-        model_path: args.model.to_string_lossy().to_string(),
-        batch_size: args.batch,
-        index_out: args.db.to_string_lossy().to_string(),
-        total_files,
-        total_chunks: total_stored_chunks,
-        timing_ms: TimingMs {
-            chunking: chunking_ms,
-            model_load: model_load_ms,
-            embedding: embedding_ms,
-            index_build: 0,
-            index_save: index_save_ms,
-            total: total_ms,
-        },
-        throughput_chunks_per_sec: throughput,
-        memory_mb: MemoryReport {
-            before_rss: mem_before.rss_mb,
-            after_rss: mem_after.rss_mb,
-            delta: mem_after.rss_mb - mem_before.rss_mb,
-            peak_working_set: mem_after.peak_ws_mb,
-        },
-        index_size_mb: db_size_mb,
-    };
-
-    report.print_console();
+    metrics.print_console();
 
     if !args.report.is_empty() {
-        report.write_json(&args.report)?;
-        report.write_markdown(&args.report)?;
+        metrics.write_json(&args.report)?;
+        metrics.write_markdown(&args.report)?;
         info!(
             "Report written to {}.json and {}.md",
             args.report, args.report

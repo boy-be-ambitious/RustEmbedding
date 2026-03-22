@@ -1,26 +1,15 @@
 {
-  "generated_at_unix": 1742623589,
-  "generated_at": "2026-03-22T05:06:29Z",
-  "repo_path": "hmosworld-master",
-  "model_path": "C:\\Program Files\\Huawei\\DevEco Studio\\plugins\\codegenie-plugin\\embedding_model\\VESO-model\\VESO-25M",
-  "batch_size": 16,
-  "index_out": "index.db",
-  "total_files": 161,
-  "total_chunks": 788,
-  "timing_ms": {
-    "chunking": 36,
-    "model_load": 289,
-    "embedding": 22190,
-    "index_build": 0,
-    "index_save": 3,
-    "total": 22548
-  },
-  "throughput_chunks_per_sec": 35.51,
-  "memory_mb": {
-    "before_rss": 5.1,
-    "after_rss": 184.0,
-    "delta": 178.9,
-    "peak_working_set": 419.4
-  },
-  "index_size_mb": 3.84
+  "total_time": 23.1099361,
+  "embedding_file_time": 22.1212511,
+  "db_write_file_time": 0.0211241,
+  "embedding_symbol_time": 0.0,
+  "db_write_symbol_time": 0.0,
+  "start_memory": 17.58984375,
+  "peak_memory": 416.2109375,
+  "start_cpu": 100.0,
+  "peak_cpu": 1405.1593017578125,
+  "start_storage": 3.8984375,
+  "end_storage": 3.8984375,
+  "file_count": 161,
+  "chunk_count": 788
 }
