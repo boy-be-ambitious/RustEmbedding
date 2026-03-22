@@ -296,6 +296,11 @@ A companion `report.md` Markdown table is also written alongside the JSON.
 
 #### 4. 向量存储与检索（`store.rs`）
 
+Rust (build-time):
+
+rusqlite 0.32 — SQLite bindings (bundled, no external dependency)
+sqlite-vec 0.1.8-alpha.1 — sqlite-vec extension for vector storage
+
 数据库结构：
 
 ```sql
@@ -415,10 +420,10 @@ The test suite covers:
 
 | Crate | Purpose |
 |---|---|
-| `ort 2.0.0-rc.12` + `ort-sys` | ONNX Runtime bindings; DLL loaded via `LoadLibraryW` + `ort::set_api` to bypass Windows Smart App Control hang on `LoadLibraryExW` |
+| `ort 2.0.0-rc.10` + `ort-sys` | ONNX Runtime bindings; DLL loaded via `LoadLibraryW` + `ort::set_api` to bypass Windows Smart App Control hang on `LoadLibraryExW` |
 | `tokenizers 0.21` | HuggingFace tokenizer (BPE / `onig` regex backend) |
 | `rusqlite 0.32` | SQLite bindings (bundled SQLite, no system dependency) |
-| `sqlite-vec 0.1.8-alpha.1` | sqlite-vec extension — `vec0` virtual table for vector search |
+| `sqlite-vec 0.1.8-alpha.1` | sqlite-vec extension — `vec0` virtual table for vector search (KNN with L2/cosine distance) |
 | `sha2 0.10` | SHA-256 content hashing for change detection |
 | `clap 4` | CLI argument parsing (`derive` API) |
 | `serde` / `serde_json` | JSON serialisation of reports |
@@ -426,3 +431,46 @@ The test suite covers:
 | `anyhow` | Ergonomic error handling |
 | `walkdir` | Recursive directory traversal |
 | `windows 0.58` | Windows RSS / peak-working-set memory stats |
+| `sysinfo 0.33` | Cross-platform system info (memory, CPU) |
+| `rayon 1` | Parallel iterator for batch processing |
+| `log 0.4` + `env_logger 0.11` | Logging facade with env-based filtering |
+| `chrono 0.4` | Timestamp generation for reports |
+
+### Database Dependencies (Python)
+
+For `dump_rows.py` to read the vector database:
+
+| Package | Purpose |
+|---|---|
+| `sqlite-vec` | Python bindings for sqlite-vec extension; enables reading `vec0` virtual tables |
+
+---
+
+## Utility Scripts
+
+### `dump_rows.py` — Inspect database contents
+
+Print `k` rows from the database with their embedding vectors:
+
+```powershell
+# Install dependency (once)
+pip install sqlite-vec
+
+# Show 3 rows (default)
+python dump_rows.py
+
+# Custom database and row count
+python dump_rows.py my_index.db 10
+```
+
+Output example:
+
+```
+--- Chunk 2233 ---
+File: features/mine/src/main/ets/views/ArticleDetailView.ets
+Lines: 1-32
+Text (first 200 chars): /*
+ * Copyright (c) 2023 Huawei Device Co., Ltd....
+Vector dim: 768
+Vector (first 10): (-0.005581612698733807, -0.006760456133633852, 0.05681055039167404, ...)
+```
