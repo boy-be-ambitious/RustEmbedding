@@ -1,0 +1,11 @@
+/target
+/data
+*.bin
+*.json.bak
+*.png
+
+# Added by cargo
+#
+# already existing elements were commented out
+
+#/target

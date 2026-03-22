@@ -1,0 +1,36 @@
+[package]
+name = "rust-embedding"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rust-embedding"
+path = "src/main.rs"
+
+[dependencies]
+ort = { version = "2.0.0-rc.10", default-features = false, features = ["load-dynamic", "std", "ndarray", "api-24"] }
+ort-sys = { version = "2.0.0-rc.10", default-features = false, features = ["api-24"] }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+rayon = "1"
+anyhow = "1"
+walkdir = "2"
+log = "0.4"
+env_logger = "0.11"
+chrono = { version = "0.4", features = ["serde"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_Storage_FileSystem",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
