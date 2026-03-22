@@ -1,2 +1,2 @@
 VESO_ONNX=C:\Program Files\Huawei\DevEco Studio\plugins\codegenie-plugin\embedding_model\VESO-model\VESO-25M
-ONNXRUNTIME=C:\Users\qinzh\AppData\Local\.lingma\env\onnxruntime.dll
+ONNXRUNTIME=C:\Users\qinzh\Downloads\onnxruntime-win-x64-1.24.4\lib\onnxruntime.dll

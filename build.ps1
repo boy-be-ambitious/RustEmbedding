@@ -27,8 +27,6 @@ if (-not $SkipCompile) {
 # ── Run ───────────────────────────────────────────────────────────────────────
 $bin = Join-Path $PSScriptRoot "target\release\rust-embedding.exe"
 
-$reportArg = if ($Report) { "--report=$Report" } else { "" }
-
 Write-Host "==> Building index for '$Repo' ..."
 
 & $bin build `

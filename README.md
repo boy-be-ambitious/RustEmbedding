@@ -12,7 +12,7 @@ and answers natural-language or code queries with cosine-similarity retrieval.
 | Requirement | Notes |
 |---|---|
 | Rust toolchain (stable) | Install from [rustup.rs](https://rustup.rs) |
-| `onnxruntime.dll` (Windows) | Bundled with **Lingma** at `%LOCALAPPDATA%\.lingma\env\onnxruntime.dll`, or downloadable from the [ONNX Runtime releases page](https://github.com/microsoft/onnxruntime/releases) |
+| `onnxruntime.dll` (Windows) | Use the **official CPU release**: download `onnxruntime-win-x64-1.24.4.zip` from the [ONNX Runtime releases page](https://github.com/microsoft/onnxruntime/releases) and extract to e.g. `C:\Users\<you>\Downloads\onnxruntime-win-x64-1.24.4`; the dll is at `lib\onnxruntime.dll` inside that directory. **Version must be 1.24.x** (the `ort` crate is built against API level 24). Bundled Lingma / DevEco dlls are incompatible (wrong version or hang on load). |
 | VESO-25M model directory | Bundled with **DevEco Studio** at `C:\Program Files\Huawei\DevEco Studio\plugins\codegenie-plugin\embedding_model\VESO-model\VESO-25M`; must contain `tokenizer.json` and `model_fp16.onnx` |
 | Test corpus (`.ets` files) | `hmosworld-master/` is included in this repo and is used in the examples below |
 
@@ -34,7 +34,17 @@ at the top of each file if your paths differ from the defaults.
 ## Step 1 — Compile and build the index
 
 ```powershell
+# Defaults — uses hmosworld-master, DevEco VESO-25M, ORT 1.24.4
 .\build.ps1
+
+# Explicit paths (all defaults shown)
+.\build.ps1 `
+  -Repo   "hmosworld-master" `
+  -Model  "C:\Program Files\Huawei\DevEco Studio\plugins\codegenie-plugin\embedding_model\VESO-model\VESO-25M" `
+  -Ort    "C:\Users\qinzh\Downloads\onnxruntime-win-x64-1.24.4\lib\onnxruntime.dll" `
+  -Out    "index.bin" `
+  -Batch  16 `
+  -Report "report"
 ```
 
 Default parameters (override with flags):
@@ -43,16 +53,20 @@ Default parameters (override with flags):
 |---|---|---|
 | `-Repo` | `hmosworld-master` | Root directory to scan for `.ets` files |
 | `-Model` | DevEco Studio VESO-25M path | Directory containing `tokenizer.json` and `model_fp16.onnx` |
-| `-Ort` | `%LOCALAPPDATA%\.lingma\env\onnxruntime.dll` | Path to `onnxruntime.dll` |
+| `-Ort` | `C:\Users\<you>\Downloads\onnxruntime-win-x64-1.24.4\lib\onnxruntime.dll` | Path to `onnxruntime.dll` (must be v1.24.x) |
 | `-Out` | `index.bin` | Output binary index file |
 | `-Batch` | `16` | ONNX inference batch size (16–32 recommended) |
 | `-Report` | `report` | Stem for report files: writes `<stem>.json` and `<stem>.md` |
 | `-SkipCompile` | off | Skip `cargo build --release` and use the existing binary |
 
-Example with custom paths:
+Example with a custom repo and batch size:
 
 ```powershell
-.\build.ps1 -Repo "path\to\my\repo" -Batch 32 -Report my_report
+.\build.ps1 `
+  -Repo   "path\to\my\repo" `
+  -Ort    "C:\Users\qinzh\Downloads\onnxruntime-win-x64-1.24.4\lib\onnxruntime.dll" `
+  -Batch  32 `
+  -Report my_report
 ```
 
 > **Tip:** set `RUST_LOG` to control log verbosity.
@@ -62,36 +76,36 @@ Example with custom paths:
 
 ```
 [INFO] Chunking .ets files under "hmosworld-master" ...
-[INFO]   42 files → 318 chunks  (3.21ms)
+[INFO]   161 files → 788 chunks  (19ms)
 [INFO] Loading tokenizer and ONNX model ...
-[INFO]   Model loaded (1.84s).
-[INFO] Embedding 318 chunks (batch_size=16) ...
-[INFO]   50/318 chunks embedded
-[INFO]   100/318 chunks embedded
+[INFO]   Model loaded (0.29s).
+[INFO] Embedding 788 chunks (batch_size=16) ...
+[INFO]   64/788 chunks embedded
+[INFO]   112/788 chunks embedded
   ...
-[INFO]   Embedding done (12.30s)
+[INFO]   Embedding done (23.17s)
 [INFO] Index saved to "index.bin"
 
 ====== Build Stats ======
   Repo              : hmosworld-master
-  Files processed   : 42
-  Chunks created    : 318
+  Files processed   : 161
+  Chunks created    : 788
   Batch size        : 16
 --------------------------
-  Chunking time     : 3.21ms
-  Model load time   : 1.84s
-  Embedding time    : 12.30s
-  Index build time  : 841µs
-  Index save time   : 6.12ms
-  TOTAL             : 14.15s
-  Throughput        : 22.5 chunks/s
+  Chunking time     : 19ms
+  Model load time   : 292ms
+  Embedding time    : 23172ms
+  Index build time  : 0ms
+  Index save time   : 2ms
+  TOTAL             : 23487ms
+  Throughput        : 34.0 chunks/s
 --------------------------
-  Mem before (RSS)  : 14.3 MB
-  Mem after  (RSS)  : 312.8 MB
-  Mem delta         : 298.5 MB
-  Peak working set  : 421.0 MB
+  Mem before (RSS)  : 5.1 MB
+  Mem after  (RSS)  : 182.9 MB
+  Mem delta         : 177.7 MB
+  Peak working set  : 418.3 MB
 --------------------------
-  Index file size   : 0.94 MB
+  Index file size   : 2.95 MB
 =========================
 ```
 
@@ -101,30 +115,30 @@ When `--report report` is passed, the following file is written automatically:
 
 ```json
 {
-  "generated_at_unix": 1742557200,
-  "generated_at": "2026-03-21T10:00:00Z",
+  "generated_at_unix": 1742601722,
+  "generated_at": "2026-03-22T04:02:02Z",
   "repo_path": "hmosworld-master",
   "model_path": "C:\\...\\VESO-25M",
   "batch_size": 16,
   "index_out": "index.bin",
-  "total_files": 42,
-  "total_chunks": 318,
+  "total_files": 161,
+  "total_chunks": 788,
   "timing_ms": {
-    "chunking": 3,
-    "model_load": 1840,
-    "embedding": 12300,
-    "index_build": 1,
-    "index_save": 6,
-    "total": 14150
+    "chunking": 19,
+    "model_load": 292,
+    "embedding": 23172,
+    "index_build": 0,
+    "index_save": 2,
+    "total": 23487
   },
-  "throughput_chunks_per_sec": 22.48,
+  "throughput_chunks_per_sec": 34.0,
   "memory_mb": {
-    "before_rss": 14.3,
-    "after_rss": 312.8,
-    "delta": 298.5,
-    "peak_working_set": 421.0
+    "before_rss": 5.1,
+    "after_rss": 182.9,
+    "delta": 177.7,
+    "peak_working_set": 418.3
   },
-  "index_size_mb": 0.94
+  "index_size_mb": 2.95
 }
 ```
 
@@ -135,8 +149,17 @@ A companion `report.md` Markdown table is also written alongside the JSON.
 ## Step 2 — Query the index
 
 ```powershell
+# Short form (uses index.bin + defaults)
 .\search.ps1 -Query "AudioPlayer initialization"
 .\search.ps1 -Query "network request" -Top 10
+
+# Explicit paths
+.\search.ps1 `
+  -Query  "AudioPlayer initialization" `
+  -Index  "index.bin" `
+  -Model  "C:\Program Files\Huawei\DevEco Studio\plugins\codegenie-plugin\embedding_model\VESO-model\VESO-25M" `
+  -Ort    "C:\Users\qinzh\Downloads\onnxruntime-win-x64-1.24.4\lib\onnxruntime.dll" `
+  -Top    5
 ```
 
 | Parameter | Default | Description |
@@ -144,7 +167,7 @@ A companion `report.md` Markdown table is also written alongside the JSON.
 | `-Query` | **required** | Natural-language or code query |
 | `-Index` | `index.bin` | Index file produced by `build.ps1` |
 | `-Model` | DevEco Studio VESO-25M path | Model directory (tokenizer) |
-| `-Ort` | Lingma `onnxruntime.dll` | Path to `onnxruntime.dll` |
+| `-Ort` | `C:\Users\<you>\Downloads\onnxruntime-win-x64-1.24.4\lib\onnxruntime.dll` | Path to `onnxruntime.dll` (must be v1.24.x) |
 | `-Top` | `5` | Number of results to return |
 
 ### Example output
@@ -152,15 +175,15 @@ A companion `report.md` Markdown table is also written alongside the JSON.
 ```
 === Top 5 results for: "AudioPlayer initialization" ===
 
-[1] score=0.9312  features/audio/src/main/ets/components/AudioPlayer.ets  L1–48
-    | @Component
-    | export struct AudioPlayer {
-    |   private player: media.AVPlayer | null = null
+[1] score=0.7834  commons\audioplayer\src\main\ets\service\SpeechPlayerService.ets  L72–72
+    |         let filePath = path + TEMP_AUDIO_FILE_NAME;
 
-[2] score=0.8947  features/audio/src/main/ets/viewmodel/AudioViewModel.ets  L12–35
-    | initPlayer() {
-    |   this.avPlayer = media.createAVPlayer()
-    |   this.avPlayer.on('stateChange', ...)
+[2] score=0.7586  features\mine\src\main\ets\service\UserNetFunc.ets  L166–166
+    |         const aaid: string = await AAID.getAAID();
+
+[3] score=0.7447  features\mine\src\main\ets\service\UserNetFunc.ets  L167–168
+    |         const pushToken: string = await pushService.getToken();
+    |         Logger.info(TAG, 'Get AAID successfully: %{public}s', aaid);
 ...
 ```
 
@@ -201,7 +224,7 @@ The test suite covers:
 
 | Crate | Purpose |
 |---|---|
-| `ort 2.0.0-rc.12` | ONNX Runtime bindings (`load-dynamic` for DLL loading) |
+| `ort 2.0.0-rc.12` + `ort-sys` | ONNX Runtime bindings; DLL loaded via `LoadLibraryW` + `ort::set_api` to bypass Windows Smart App Control hang on `LoadLibraryExW` |
 | `tokenizers 0.21` | HuggingFace tokenizer (BPE / `onig` regex backend) |
 | `clap 4` | CLI argument parsing (`derive` API) |
 | `serde` / `serde_json` | JSON serialisation of reports |
